@@ -16,19 +16,21 @@ export class AIError extends Error {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// одна модель: до 2 попыток при перегрузке (503/500), с паузой
+// одна модель: 2 попытки. Первая со строгой схемой ответа, вторая без неё (на случай, если схема ломает запрос)
 async function tryModel(model, key, parts, schema) {
   let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const strict = attempt === 0;
+    const body = {
+      contents: [{ role: 'user', parts: strict ? parts : [...parts, { text: `Ответь только JSON такой формы (схема): ${JSON.stringify(schema)}` }] }],
+      generationConfig: strict ? { responseMimeType: 'application/json', responseSchema: schema, temperature: 0.2 } : { responseMimeType: 'application/json', temperature: 0.2 },
+    };
     let res;
     try {
       res = await fetch(`${BASE}/models/${model}:generateContent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts }],
-          generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0.2 },
-        }),
+        body: JSON.stringify(body),
       });
     } catch {
       const e = new AIError('Нет связи с ИИ. Проверь интернет.', 'net');
@@ -40,30 +42,30 @@ async function tryModel(model, key, parts, schema) {
       const j = await res.json();
       const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('');
       if (!text) {
-        const e = new AIError('ИИ не ответил (фото могло попасть под фильтр). Попробуй другое фото.', 'empty');
-        e.fatal = true;
-        throw e;
+        const reason = j.promptFeedback?.blockReason || j.candidates?.[0]?.finishReason || '';
+        last = new AIError(`${model}: пустой ответ ${reason}`.trim(), 'empty');
+        last.detail = last.message;
+        continue;
       }
       try {
-        return JSON.parse(text);
+        return JSON.parse(text.replace(/^```json\s*|```$/g, '').trim());
       } catch {
-        throw new AIError('ИИ ответил не по формату.', 'parse');
+        last = new AIError(`${model}: ответ не по формату`, 'parse');
+        last.detail = last.message;
+        continue;
       }
     }
 
-    const body = await res.json().catch(() => ({}));
-    const msg = body.error?.message || '';
-    const fatal = (m, c) => Object.assign(new AIError(m, c), { fatal: true });
+    const err = await res.json().catch(() => ({}));
+    const msg = err.error?.message || '';
+    const detail = `${model}: ${res.status} ${msg}`.slice(0, 220);
+    const fatal = (m, c) => Object.assign(new AIError(m, c), { fatal: true, detail });
     if (res.status === 400 && /api key|API_KEY/i.test(msg)) throw fatal('Ключ не подходит. Проверь его в настройках.', 'key');
-    if (res.status === 401 || res.status === 403) throw fatal('У ключа нет доступа к ИИ. Проверь ключ в настройках.', 'key');
-    if (res.status === 404) throw new AIError(`Модель «${model}» недоступна.`, 'model');
-    if (res.status === 429) throw new AIError('Бесплатный лимит ИИ на сейчас исчерпан.', 'quota');
-    if (res.status >= 500) {
-      last = new AIError('Сервер ИИ перегружен.', 'down');
-      if (attempt < 1) await sleep(1200);
-      continue;
-    }
-    throw new AIError(msg || `Ошибка ИИ (${res.status})`, 'http');
+    if (res.status === 401 || res.status === 403) throw fatal(`У ключа нет доступа к ИИ (${res.status}). ${msg}`.slice(0, 200), 'key');
+    const code = res.status === 404 ? 'model' : res.status === 429 ? 'quota' : res.status >= 500 ? 'down' : 'http';
+    last = Object.assign(new AIError(detail, code), { detail });
+    if (code === 'model' || code === 'quota') throw last; // другая модель, а не повтор
+    if (attempt < 1) await sleep(1000);
   }
   throw last;
 }
@@ -99,11 +101,14 @@ async function call(parts, schema) {
   }
   if (r) return r.ok;
 
-  const quota = errors.some((e) => e.code === 'quota');
-  const down = errors.some((e) => e.code === 'down');
-  if (down) throw new AIError('ИИ Google сейчас перегружен (это бывает на бесплатном уровне). Подожди минуту и нажми кнопку ещё раз или введи вручную.', 'down');
-  if (quota) throw new AIError('Бесплатный лимит ИИ на сейчас исчерпан. Подожди минуту (дневной лимит обновится ночью) или введи вручную.', 'quota');
-  throw errors[errors.length - 1] || new AIError('ИИ сейчас недоступен.', 'down');
+  const kinds = errors.map((e) => e.code);
+  const lines = [...new Set(errors.map((e) => e.detail || e.message))].slice(0, 5).join(' • ');
+  const head = kinds.includes('down')
+    ? 'ИИ Google не отвечает или перегружен.'
+    : kinds.includes('quota')
+      ? 'Лимит бесплатного ИИ на сейчас исчерпан.'
+      : 'ИИ не смог обработать запрос.';
+  throw new AIError(`${head} Нажми кнопку ещё раз через минуту или введи вручную. Подробности: ${lines}`, kinds[0] || 'down');
 }
 
 const img = (b64) => ({ inline_data: { mime_type: 'image/jpeg', data: b64 } });
