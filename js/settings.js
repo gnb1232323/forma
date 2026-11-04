@@ -177,7 +177,7 @@ export function openSettings() {
       try {
         const found = await listFlashModels(s.apiKey);
         models = [...new Set([...found, s.model, DEFAULT_MODEL])];
-        if (found.length && !found.includes(s.model)) s.model = found.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : found[found.length - 1];
+        if (found.length && !found.includes(s.model)) s.model = found.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : found[0];
         keyStatus = found.length ? 'Ключ работает' : 'Ключ принят, но подходящих моделей не нашёл';
         keyKind = 'ok';
       } catch (err) {

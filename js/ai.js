@@ -5,7 +5,8 @@ import { state } from './store.js';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';
 export const DEFAULT_MODEL = 'gemini-2.5-flash';
-const FALLBACKS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest'];
+// если выбранная модель перегружена — пробуем соседние, потом всё, что отдаёт сам Google для этого ключа
+const FALLBACKS = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite', 'gemini-flash-lite-latest'];
 
 export class AIError extends Error {
   constructor(msg, code) {
@@ -15,61 +16,94 @@ export class AIError extends Error {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// одна модель: до 2 попыток при перегрузке (503/500), с паузой
+async function tryModel(model, key, parts, schema) {
+  let last = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let res;
+    try {
+      res = await fetch(`${BASE}/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts }],
+          generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0.2 },
+        }),
+      });
+    } catch {
+      const e = new AIError('Нет связи с ИИ. Проверь интернет.', 'net');
+      e.fatal = true;
+      throw e;
+    }
+
+    if (res.ok) {
+      const j = await res.json();
+      const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('');
+      if (!text) {
+        const e = new AIError('ИИ не ответил (фото могло попасть под фильтр). Попробуй другое фото.', 'empty');
+        e.fatal = true;
+        throw e;
+      }
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new AIError('ИИ ответил не по формату.', 'parse');
+      }
+    }
+
+    const body = await res.json().catch(() => ({}));
+    const msg = body.error?.message || '';
+    const fatal = (m, c) => Object.assign(new AIError(m, c), { fatal: true });
+    if (res.status === 400 && /api key|API_KEY/i.test(msg)) throw fatal('Ключ не подходит. Проверь его в настройках.', 'key');
+    if (res.status === 401 || res.status === 403) throw fatal('У ключа нет доступа к ИИ. Проверь ключ в настройках.', 'key');
+    if (res.status === 404) throw new AIError(`Модель «${model}» недоступна.`, 'model');
+    if (res.status === 429) throw new AIError('Бесплатный лимит ИИ на сейчас исчерпан.', 'quota');
+    if (res.status >= 500) {
+      last = new AIError('Сервер ИИ перегружен.', 'down');
+      if (attempt < 1) await sleep(1200);
+      continue;
+    }
+    throw new AIError(msg || `Ошибка ИИ (${res.status})`, 'http');
+  }
+  throw last;
+}
+
+let discovered = null;
+
 async function call(parts, schema) {
   const key = state.settings.apiKey?.trim();
   if (!key) throw new AIError('Сначала добавь ключ ИИ в настройках.', 'nokey');
-  const first = state.settings.model || DEFAULT_MODEL;
-  const models = [first, ...FALLBACKS.filter((m) => m !== first)];
-  let lastErr = null;
+  const tried = new Set();
+  const errors = [];
 
-  for (const model of models) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      let res;
+  const run = async (list) => {
+    for (const model of list) {
+      if (tried.has(model)) continue;
+      tried.add(model);
       try {
-        res = await fetch(`${BASE}/models/${model}:generateContent`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts }],
-            generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0.2 },
-          }),
-        });
-      } catch {
-        throw new AIError('Нет связи с ИИ. Проверь интернет.', 'net');
+        return { ok: await tryModel(model, key, parts, schema) };
+      } catch (e) {
+        if (e.fatal) throw e;
+        errors.push(e);
       }
-
-      if (res.ok) {
-        const j = await res.json();
-        const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('');
-        if (!text) throw new AIError('ИИ не ответил (фото могло попасть под фильтр). Попробуй другое.', 'empty');
-        try {
-          return JSON.parse(text);
-        } catch {
-          throw new AIError('ИИ ответил не по формату. Попробуй ещё раз.', 'parse');
-        }
-      }
-
-      const body = await res.json().catch(() => ({}));
-      const msg = body.error?.message || '';
-      if (res.status === 400 && /api key|API_KEY/i.test(msg)) throw new AIError('Ключ не подходит. Проверь его в настройках.', 'key');
-      if (res.status === 401 || res.status === 403) throw new AIError('У ключа нет доступа к ИИ. Проверь ключ в настройках.', 'key');
-      if (res.status === 404) {
-        lastErr = new AIError(`Модель «${model}» недоступна. Попробую другую.`, 'model');
-        break;
-      }
-      if (res.status === 429) {
-        lastErr = new AIError('Бесплатный лимит ИИ на сейчас исчерпан. Подожди минуту или вводи вручную.', 'quota');
-        break;
-      }
-      if (res.status >= 500) {
-        lastErr = new AIError('Сервер ИИ перегружен. Попробуй чуть позже.', 'down');
-        await sleep(1200);
-        continue;
-      }
-      throw new AIError(msg || `Ошибка ИИ (${res.status})`, 'http');
     }
+    return null;
+  };
+
+  const first = state.settings.model || DEFAULT_MODEL;
+  let r = await run([first, ...FALLBACKS]);
+  if (!r) {
+    // свои варианты не помогли: спрашиваем у Google, какие модели доступны этому ключу
+    if (!discovered) discovered = await listFlashModels(key, true).catch(() => []);
+    r = await run(discovered);
   }
-  throw lastErr || new AIError('ИИ сейчас недоступен.', 'down');
+  if (r) return r.ok;
+
+  const quota = errors.some((e) => e.code === 'quota');
+  const down = errors.some((e) => e.code === 'down');
+  if (down) throw new AIError('ИИ Google сейчас перегружен (это бывает на бесплатном уровне). Подожди минуту и нажми кнопку ещё раз или введи вручную.', 'down');
+  if (quota) throw new AIError('Бесплатный лимит ИИ на сейчас исчерпан. Подожди минуту (дневной лимит обновится ночью) или введи вручную.', 'quota');
+  throw errors[errors.length - 1] || new AIError('ИИ сейчас недоступен.', 'down');
 }
 
 const img = (b64) => ({ inline_data: { mime_type: 'image/jpeg', data: b64 } });
@@ -169,7 +203,7 @@ export function analyzeFood({ b64, text }) {
 }
 
 // ---------- Проверка ключа и список моделей ----------
-export async function listFlashModels(key) {
+export async function listFlashModels(key, withPreview = false) {
   let res;
   try {
     res = await fetch(`${BASE}/models?pageSize=200`, { headers: { 'x-goog-api-key': key } });
@@ -181,8 +215,9 @@ export async function listFlashModels(key) {
   return (j.models || [])
     .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
     .map((m) => m.name.replace('models/', ''))
-    .filter((n) => /^gemini-[\d.]+-flash(-lite)?$/.test(n) || n === 'gemini-flash-latest')
-    .sort();
+    .filter((n) => /^gemini-[\d.]+-flash(-lite)?$/.test(n) || /^gemini-flash(-lite)?-latest$/.test(n) || (withPreview && /^gemini-[\d.]+-flash(-lite)?-preview[\w-]*$/.test(n)))
+    .sort()
+    .reverse();
 }
 
 // ---------- Фото: уменьшение ----------
