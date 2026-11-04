@@ -12,6 +12,11 @@ export function guessSlot() {
 }
 
 const blank = () => ({ name: '', grams: 0, kcal: 0, p: 0, f: 0, c: 0, fav: false });
+// «опорная» порция: от неё считаем, когда меняют граммы (так калории не теряются, если поле на секунду очистили)
+const anchor = (it) => {
+  it.base = it.grams > 0 ? { grams: it.grams, kcal: it.kcal, p: it.p, f: it.f, c: it.c } : null;
+  return it;
+};
 const fromAI = (i) => ({
   name: i.name,
   grams: Number(i.grams) || 0,
@@ -30,6 +35,7 @@ export async function openFood({ mode = 'manual', file = null, items = [], edit 
     text: '',
   };
   if (!m.items.length && mode !== 'text' && mode !== 'photo') m.items.push(blank());
+  m.items.forEach(anchor);
   let thumb = null;
   let b64 = null;
   const photoId = edit?.photoId || null;
@@ -61,7 +67,13 @@ export async function openFood({ mode = 'manual', file = null, items = [], edit 
           )
           .join('')}
       </div>
+      <div class="per100" data-per="${i}">${per100(it)}</div>
     </div>`;
+  }
+
+  // подсказка: сколько это на 100 г — сразу видно, если цифры нереальные
+  function per100(it) {
+    return it.grams > 0 && it.kcal > 0 ? `≈ ${fmt((it.kcal / it.grams) * 100)} ккал на 100 г` : '';
   }
 
   function draw() {
@@ -123,6 +135,7 @@ export async function openFood({ mode = 'manual', file = null, items = [], edit 
       const r = await analyzeFood({ b64, text: m.text.trim() });
       const got = (r.items || []).map(fromAI).filter((i) => i.name);
       if (!got.length) throw new AIError('ИИ не нашёл еду. Попробуй описать словами.', 'empty');
+      got.forEach(anchor);
       m.items = m.items.filter((i) => i.name || i.kcal).concat(got);
       ui.status = 'Готово. Поправь граммы, если нужно';
       ui.kind = 'ok';
@@ -222,18 +235,25 @@ export async function openFood({ mode = 'manual', file = null, items = [], edit 
       return;
     }
     const v = num(t.value);
-    if (k === 'grams' && it.grams > 0 && v > 0) {
-      // граммы поменяли — пересчитываем остальное пропорционально
-      const ratio = v / it.grams;
+    if (k === 'grams') {
       it.grams = v;
-      for (const f of ['kcal', 'p', 'f', 'c']) {
-        it[f] *= ratio;
-        const inp = $(`[data-f="${f}"][data-i="${t.dataset.i}"]`, ctl.body);
-        if (inp) inp.value = it[f] ? r1(it[f]) : '';
+      if (v > 0 && it.base) {
+        // граммы поменяли — калории и БЖУ пересчитываются от опорной порции
+        const ratio = v / it.base.grams;
+        for (const f of ['kcal', 'p', 'f', 'c']) {
+          it[f] = it.base[f] * ratio;
+          const inp = $(`[data-f="${f}"][data-i="${t.dataset.i}"]`, ctl.body);
+          if (inp) inp.value = it[f] ? r1(it[f]) : '';
+        }
+      } else if (v > 0 && it.kcal > 0) {
+        anchor(it); // вес до этого не был указан: считаем, что введённые калории относятся к нему
       }
     } else {
       it[k] = v;
+      anchor(it); // значения поправили руками — от них и считаем дальше
     }
+    const hint = $(`[data-per="${t.dataset.i}"]`, ctl.body);
+    if (hint) hint.textContent = per100(it);
     refreshTotals();
   });
 
@@ -242,7 +262,7 @@ export async function openFood({ mode = 'manual', file = null, items = [], edit 
       ctl,
       pick: (f) => {
         m.items = m.items.filter((x) => x.name || x.kcal);
-        m.items.push({ ...f, fav: false });
+        m.items.push(anchor({ ...f, fav: false }));
       },
       redraw: draw,
     });

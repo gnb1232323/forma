@@ -292,3 +292,5 @@ select.input { appearance: none; }
 .toast.err { background: var(--red); color: #fff; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.per100 { font-size: 12px; color: var(--muted); text-align: right; margin-top: -4px; min-height: 0; }
+.per100:empty { display: none; }
