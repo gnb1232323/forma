@@ -21,9 +21,15 @@ async function tryModel(model, key, parts, schema) {
   let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     const strict = attempt === 0;
+    const config = { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 1200 };
+    if (strict) {
+      config.responseSchema = schema;
+      // у 2.5 flash «размышления» включены по умолчанию и съедают секунды — для распознавания они не нужны
+      if (/gemini-2\.5-flash/.test(model)) config.thinkingConfig = { thinkingBudget: 0 };
+    }
     const body = {
       contents: [{ role: 'user', parts: strict ? parts : [...parts, { text: `Ответь только JSON такой формы (схема): ${JSON.stringify(schema)}` }] }],
-      generationConfig: strict ? { responseMimeType: 'application/json', responseSchema: schema, temperature: 0.2 } : { responseMimeType: 'application/json', temperature: 0.2 },
+      generationConfig: config,
     };
     let res;
     try {
@@ -31,8 +37,13 @@ async function tryModel(model, key, parts, schema) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(25000),
       });
-    } catch {
+    } catch (err) {
+      if (err?.name === 'TimeoutError') {
+        // модель слишком долго молчит — идём к следующей, а не ждём дальше
+        throw Object.assign(new AIError(`${model}: нет ответа за 25 с`, 'down'), { detail: `${model}: нет ответа за 25 с` });
+      }
       const e = new AIError('Нет связи с ИИ. Проверь интернет.', 'net');
       e.fatal = true;
       throw e;
@@ -251,7 +262,7 @@ function scaled(src, max, q) {
 }
 export async function prepareImage(file) {
   const bmp = await loadBitmap(file);
-  const full = scaled(bmp, 1024, 0.82);
+  const full = scaled(bmp, 768, 0.72);
   return { thumb: scaled(bmp, 420, 0.72), b64: full.split(',')[1] };
 }
 
