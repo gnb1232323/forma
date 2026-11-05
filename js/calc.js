@@ -51,6 +51,14 @@ export const burnKcal = (met, minutes, kg) => Math.round(burnPerMin(met, kg) * m
 export const STRENGTH_MET = { compound: 3.8, isolation: 3.0, default: 3.5 };
 export const strengthMet = (movement) => STRENGTH_MET[movement] || STRENGTH_MET.default;
 
+// Тип движения по названию — для прикидки, когда ИИ ещё не определил его
+export function guessMovement(name = '') {
+  const n = name.toLowerCase();
+  if (/мах|сведен|разведен|сгибан|разгибан|бицепс|трицепс|кроссовер|пек-?дек|бабочк|икр|пуловер|шраг/.test(n)) return 'isolation';
+  if (/жим|тяг|присед|выпад|подтяг|отжим|становая|гребл|тяга|трастер|швунг|отжиман/.test(n)) return 'compound';
+  return '';
+}
+
 // Время упражнения: работа (~3,5 с на повтор) + отдых между подходами (~75 с).
 export function strengthMinutes(sets) {
   const list = Array.isArray(sets) ? sets : Array.from({ length: Number(sets) || 1 }, () => ({ reps: 10 }));

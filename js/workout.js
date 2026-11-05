@@ -1,7 +1,7 @@
 // Шторка «Упражнение»: фото -> ИИ -> подходы/повторы/вес -> сохранить.
 
 import { state, view, commit, uid, putPhoto, dropPhotoIfUnused } from './store.js';
-import { burnKcal, currentWeight, strengthMinutes, strengthMet, CARDIO } from './calc.js';
+import { burnKcal, currentWeight, strengthMinutes, strengthMet, guessMovement, CARDIO } from './calc.js';
 import { identifyExercise, checkForm, estimateBurn, prepareImage, AIError } from './ai.js';
 import { burnPayload } from './refine.js';
 import { openSheet, closeSheet, esc, icon, toast, num, clamp, hydratePhotos, $ } from './ui.js';
@@ -64,7 +64,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
 
   const hasKey = () => !!state.settings.apiKey?.trim();
   const minutes = () => (m.minutes != null && m.minutes !== '' ? Number(m.minutes) : m.kind === 'cardio' ? 30 : strengthMinutes(m.sets));
-  const autoKcal = () => burnKcal(m.met, minutes(), kg);
+  const autoKcal = () => burnKcal(m.kind === 'strength' ? strengthMet(m.movement || guessMovement(m.name)) : m.met, minutes(), kg);
   const shownKcal = () => (ui.kcalManual && m.kcal != null ? Number(m.kcal) : autoKcal());
   // время, посчитанное автоматически, при правке подходов должно пересчитываться
   if (edit && edit.kind === 'strength') {
@@ -453,7 +453,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       sets,
       minutes: minutes(),
       met: m.met,
-      movement: m.movement || '',
+      movement: m.movement || guessMovement(name),
       v: 2,
       src: ui.kcalSource,
       kcal: Math.round(shownKcal()),
