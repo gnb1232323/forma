@@ -1,5 +1,5 @@
 // Кэш оболочки приложения: после первого открытия работает без интернета (кроме ИИ и поиска по штрихкоду).
-const CACHE = 'forma-v1';
+const CACHE = 'forma-v2';
 const SHELL = [
   './',
   'index.html',
@@ -12,6 +12,7 @@ const SHELL = [
   'js/settings.js',
   'js/store.js',
   'js/ui.js',
+  'js/refine.js',
   'js/workout.js',
   'icons/icon-192.png',
   'icons/icon-512.png',

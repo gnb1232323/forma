@@ -1,6 +1,7 @@
 import { state, view, load, subscribe, today, iso, commit } from './store.js';
 import { goals, dayStats, currentWeight, equivalents, setsSummary, migrateWorkouts, MODES } from './calc.js';
 import { openWorkout, recentExercises } from './workout.js';
+import { refineRecentWithAI } from './refine.js';
 import { openFood, openBarcode, SLOTS } from './food.js';
 import { openWelcome, openSettings, openWeight, openModePicker } from './settings.js';
 import { $, $$, esc, icon, fmt, r1, clamp, hydratePhotos } from './ui.js';
@@ -246,7 +247,10 @@ document.addEventListener('visibilitychange', () => {
   if (state.profile && migrateWorkouts(state)) commit(); // старые силовые пересчитаны по новой модели
   subscribe(render);
   if (!state.profile) openWelcome();
-  else render();
+  else {
+    render();
+    refineRecentWithAI(); // в фоне: ИИ пересчитывает калории вчерашних и сегодняшних упражнений
+  }
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }

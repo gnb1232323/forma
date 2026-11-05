@@ -2,7 +2,8 @@
 
 import { state, view, commit, uid, putPhoto, dropPhotoIfUnused } from './store.js';
 import { burnKcal, currentWeight, strengthMinutes, strengthMet, CARDIO } from './calc.js';
-import { identifyExercise, checkForm, prepareImage, AIError } from './ai.js';
+import { identifyExercise, checkForm, estimateBurn, prepareImage, AIError } from './ai.js';
+import { burnPayload } from './refine.js';
 import { openSheet, closeSheet, esc, icon, toast, num, clamp, hydratePhotos, $ } from './ui.js';
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -58,7 +59,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
   let thumb = null; // новое фото (ещё не сохранено)
   let b64 = null; // для запросов к ИИ
   let photoId = m.photoId || null;
-  const ui = { busy: false, status: '', statusKind: '', alts: [], seen: '', conf: '', hint: '', form: null, kcalManual: !!edit && edit.kcal != null, steps: '', setsTouched: !!edit, nameFromAI: false };
+  const ui = { busy: false, status: '', statusKind: '', alts: [], seen: '', conf: '', hint: '', form: null, kcalManual: !!edit && edit.kcal != null, steps: '', setsTouched: !!edit, nameFromAI: false, kcalSource: 'formula', aiNote: '', aiSig: '' };
   if (edit) m.kcal = edit.kcal;
 
   const hasKey = () => !!state.settings.apiKey?.trim();
@@ -71,8 +72,20 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     else if (edit.minutes === strengthMinutes(edit.sets)) m.minutes = null;
     m.met = strengthMet(m.movement);
   }
-  // при редактировании «своё» значение только если оно реально отличается от оценки
-  if (edit) ui.kcalManual = edit.kcal != null && Math.abs(edit.kcal - autoKcal()) > 1;
+  // подпись введённых данных: если после расчёта ИИ она изменилась, расчёт устарел
+  const sig = () => JSON.stringify([m.kind, m.name.trim().toLowerCase(), m.kind === 'strength' ? m.sets.map((s) => [s.reps || 0, s.kg || 0]) : m.cardioType, minutes()]);
+  if (edit) {
+    if (edit.src === 'ai' || edit.src === 'user') {
+      ui.kcalSource = edit.src;
+      ui.kcalManual = edit.kcal != null;
+      if (edit.src === 'ai') ui.aiSig = sig();
+    } else if (edit.kcal != null && Math.abs(edit.kcal - autoKcal()) > 1) {
+      ui.kcalSource = 'user'; // старая запись с числом, которое правили руками
+      ui.kcalManual = true;
+    } else {
+      ui.kcalManual = false;
+    }
+  }
 
   const ctl = openSheet({
     title: edit ? 'Упражнение' : m.kind === 'cardio' ? 'Кардио' : 'Новое упражнение',
@@ -86,8 +99,19 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     return [...new Set(state.workouts.map((w) => w.name))].map((n) => `<option value="${esc(n)}">`).join('');
   }
 
+  const statusInline = () => (ui.status ? `<div class="ai-status inline ${ui.statusKind}">${ui.busy ? '<span class="spin"></span>' : ''}${esc(ui.status)}</div>` : '');
+  const srcLabel = () => (ui.kcalSource === 'ai' ? '(посчитал ИИ)' : ui.kcalSource === 'user' ? '(вручную)' : '(прикидка)');
+  const noteText = () =>
+    ui.kcalSource === 'ai'
+      ? esc(ui.aiNote || 'Посчитано ИИ.')
+      : ui.kcalSource === 'user'
+        ? 'Число введено вручную.'
+        : hasKey()
+          ? 'Сейчас грубая прикидка. При сохранении ИИ посчитает, сколько реально уйдёт.'
+          : 'Грубая прикидка. Чтобы ИИ считал точнее, добавь ключ в настройках.';
+
   function photoBlock() {
-    if (!thumb && !photoId) return '';
+    if (!thumb && !photoId) return statusInline();
     const src = thumb ? `src="${thumb}"` : `data-photo="${photoId}"`;
     return `<div class="photo-prev"><img ${src} alt="">${ui.status ? `<div class="ai-status ${ui.statusKind}">${ui.busy ? '<span class="spin"></span>' : ''}${esc(ui.status)}</div>` : ''}</div>`;
   }
@@ -166,10 +190,11 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       ${m.kind === 'strength' ? strengthBlock() : cardioBlock()}
       ${timeBlock()}
       <div class="kcal-line">
-        <div>${icon('flame')}<b id="w-kcal">${shownKcal()}</b> ккал сожжено <span class="muted">${ui.kcalManual ? '(вручную)' : '(оценка)'}</span></div>
-        <input class="input num" inputmode="numeric" data-in="kcal" placeholder="своё" value="${ui.kcalManual ? m.kcal : ''}">
+        <div>${icon('flame')}<b id="w-kcal">${shownKcal()}</b> ккал <span class="muted" id="w-src">${srcLabel()}</span></div>
+        <input class="input num" inputmode="numeric" data-in="kcal" placeholder="своё" value="${ui.kcalSource === 'user' ? m.kcal : ''}">
       </div>
-      <p class="hint">Это чистый расход сверх покоя: время упражнения с отдыхом × нагрузка (${m.kind === 'strength' ? (m.movement === 'isolation' ? 'лёгкая, на одну мышцу' : m.movement === 'compound' ? 'средняя, большие мышцы' : 'средняя') : 'по виду кардио'}). Реальный расход может отличаться на ±30%.</p>
+      ${hasKey() ? `<button class="btn ghost full" data-s="burn" ${ui.busy ? 'disabled' : ''}>${icon('sparkles')}Посчитать калории ИИ</button>` : ''}
+      <p class="hint" id="w-note">${noteText()}</p>
       ${formBlock()}
       <div class="sheet-actions">
         ${edit ? `<button class="btn danger" data-s="del">${icon('trash')}</button>` : ''}
@@ -184,6 +209,49 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     if (el) el.textContent = shownKcal();
     const mi = $('[data-in="minutes"]', ctl.body);
     if (mi) mi.placeholder = minutes();
+    const sl = $('#w-src', ctl.body);
+    if (sl) sl.textContent = srcLabel();
+    const nt = $('#w-note', ctl.body);
+    if (nt) nt.innerHTML = noteText();
+  }
+
+  // человек поменял подходы, время или название — прежний расчёт ИИ больше не верен
+  function invalidateAI() {
+    if (ui.kcalSource !== 'ai') return;
+    ui.kcalSource = 'formula';
+    ui.kcalManual = false;
+    ui.aiNote = '';
+    m.kcal = null;
+    refreshKcal();
+  }
+
+  // ИИ считает, сколько калорий реально уходит на это упражнение
+  async function askBurn() {
+    if (!hasKey() || ui.busy) return false;
+    ui.busy = true;
+    ui.status = 'ИИ считает калории…';
+    ui.statusKind = '';
+    draw();
+    try {
+      const r = await estimateBurn(
+        burnPayload({ name: m.name.trim() || 'упражнение', kind: m.kind, cardioType: m.cardioType, sets: m.sets, minutes: m.minutes != null && m.minutes !== '' ? Number(m.minutes) : null })
+      );
+      m.kcal = Math.round(r.kcal);
+      ui.kcalManual = true;
+      ui.kcalSource = 'ai';
+      ui.aiSig = sig();
+      ui.aiNote = `${r.why} Диапазон ${Math.round(r.low)}–${Math.round(r.high)} ккал.`;
+      ui.status = '';
+      ui.busy = false;
+      draw();
+      return true;
+    } catch (e) {
+      ui.status = `${e instanceof AIError ? e.message : 'Не получилось посчитать калории.'} Оставлена прикидка.`;
+      ui.statusKind = 'err';
+      ui.busy = false;
+      draw();
+      return false;
+    }
   }
 
   // ---------- ИИ ----------
@@ -257,24 +325,31 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       m.kind = b.dataset.v;
       m.met = m.kind === 'cardio' ? CARDIO[m.cardioType || 'walk']?.met || 5 : strengthMet(m.movement);
       if (m.kind === 'cardio' && !m.cardioType) m.cardioType = 'walk';
+      invalidateAI();
       draw();
     } else if (a === 'ctype') {
       m.cardioType = b.dataset.v;
       m.met = CARDIO[m.cardioType].met;
       if (!m.name.trim() || Object.values(CARDIO).some((c) => c.t === m.name)) m.name = CARDIO[m.cardioType].t;
+      invalidateAI();
       draw();
     } else if (a === 'alt') {
       m.name = b.dataset.v;
       ui.alts = ui.alts.filter((x) => x !== m.name);
+      invalidateAI();
       draw();
     } else if (a === 'addset') {
       const last = m.sets[m.sets.length - 1] || { reps: 12, kg: 0 };
       m.sets.push({ reps: last.reps, kg: last.kg });
+      invalidateAI();
       draw();
     } else if (a === 'delset') {
       m.sets.splice(Number(b.dataset.i), 1);
       if (!m.sets.length) m.sets.push({ reps: 12, kg: 0 });
+      invalidateAI();
       draw();
+    } else if (a === 'burn') {
+      await askBurn();
     } else if (a === 'ai') {
       runAI();
     } else if (a === 'form') {
@@ -298,7 +373,8 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       const s = m.sets[Number(t.dataset.i)];
       s[t.dataset.set] = num(t.value);
       ui.setsTouched = true;
-      if (m.minutes == null || m.minutes === '') refreshKcal();
+      invalidateAI();
+      refreshKcal();
       return;
     }
     const k = t.dataset.in;
@@ -306,9 +382,11 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     if (k === 'name') {
       m.name = t.value;
       ui.nameFromAI = false;
+      invalidateAI();
     } else if (k === 'hint') ui.hint = t.value;
     else if (k === 'minutes') {
       m.minutes = t.value === '' ? null : num(t.value);
+      invalidateAI();
       refreshKcal();
     } else if (k === 'steps') {
       ui.steps = t.value;
@@ -316,13 +394,16 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       m.minutes = st > 0 ? Math.round(st / 100) : null;
       const mi = $('[data-in="minutes"]', ctl.body);
       if (mi) mi.value = m.minutes ?? '';
+      invalidateAI();
       refreshKcal();
     } else if (k === 'kcal') {
       if (t.value === '') {
         ui.kcalManual = false;
+        ui.kcalSource = 'formula';
         m.kcal = null;
       } else {
         ui.kcalManual = true;
+        ui.kcalSource = 'user';
         m.kcal = num(t.value);
       }
       refreshKcal();
@@ -357,6 +438,10 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       toast('Добавь хотя бы один подход');
       return;
     }
+    if (ui.busy) return;
+    // ИИ считает, сколько реально уйдёт калорий (если число не введено вручную и расчёт не актуален)
+    let aiFailed = false;
+    if (hasKey() && ui.kcalSource !== 'user' && !(ui.kcalSource === 'ai' && ui.aiSig === sig())) aiFailed = !(await askBurn());
     if (thumb) photoId = await putPhoto(thumb);
     const entry = {
       id: edit?.id || uid(),
@@ -370,6 +455,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       met: m.met,
       movement: m.movement || '',
       v: 2,
+      src: ui.kcalSource,
       kcal: Math.round(shownKcal()),
       photoId,
       howTo: m.howTo || '',
@@ -379,7 +465,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     else state.workouts.push(entry);
     commit();
     closeSheet();
-    toast(`Записано: ${entry.kcal} ккал`);
+    toast(aiFailed ? `Записано ${entry.kcal} ккал (прикидка: ИИ не ответил)` : `Записано: ${entry.kcal} ккал`, aiFailed ? 'err' : '');
   }
 
   draw();
