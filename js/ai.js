@@ -132,12 +132,13 @@ const EX_SCHEMA = {
     name: { type: 'STRING' },
     kind: { type: 'STRING', enum: ['strength', 'cardio'] },
     muscles: { type: 'ARRAY', items: { type: 'STRING' } },
+    movement: { type: 'STRING', enum: ['compound', 'isolation'] },
     met: { type: 'NUMBER' },
     how_to: { type: 'STRING' },
     confidence: { type: 'STRING', enum: ['high', 'medium', 'low'] },
     alternatives: { type: 'ARRAY', items: { type: 'STRING' } },
   },
-  required: ['name', 'kind', 'muscles', 'met', 'confidence'],
+  required: ['name', 'kind', 'movement', 'muscles', 'met', 'confidence'],
 };
 
 export function identifyExercise({ b64, hint }) {
@@ -147,9 +148,10 @@ export function identifyExercise({ b64, hint }) {
     text:
       `Ты тренер в тренажёрном зале. ${b64 ? 'На фото тренажёр, его табличка с названием, рукоятка или деталь, либо положение тела при выполнении упражнения.' : 'Пользователь назвал упражнение текстом.'} ` +
       `Определи, какое упражнение выполняется. Если на табличке есть текст — прочитай его (seen_text) и опирайся на него. ` +
-      (hint ? `Подсказка от пользователя (название с таблички): «${hint}». ` : '') +
+      (hint ? `Название от пользователя: «${hint}». Считай его верным и не заменяй другим упражнением: name должен соответствовать ему (можно только поправить написание). ` : '') +
       `Отвечай по-русски. name — короткое привычное название (например «Жим ногами лёжа»). kind: strength для силовых, cardio для кардио. ` +
-      `muscles — 2–4 основные группы мышц. met — оценка MET от 2 до 9 (силовые обычно 4–6). ` +
+      `movement: compound — многосуставное на большие мышцы (жим, тяга, присед, жим ногами); isolation — на одну мышцу или сустав (махи, сведения, разведения, сгибания, разгибания). ` +
+      `muscles — 2–4 основные группы мышц. met — для кардио оценка MET от 3 до 9, для силовых поставь 3.5. ` +
       `how_to — 1–2 предложения про правильную технику. alternatives — до 3 других вариантов, если не уверен. confidence — твоя уверенность.`,
   });
   return call(parts, EX_SCHEMA);

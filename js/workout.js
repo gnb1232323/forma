@@ -1,7 +1,7 @@
 // Шторка «Упражнение»: фото -> ИИ -> подходы/повторы/вес -> сохранить.
 
 import { state, view, commit, uid, putPhoto, dropPhotoIfUnused } from './store.js';
-import { burnKcal, currentWeight, strengthMinutes, CARDIO } from './calc.js';
+import { burnKcal, currentWeight, strengthMinutes, strengthMet, CARDIO } from './calc.js';
 import { identifyExercise, checkForm, prepareImage, AIError } from './ai.js';
 import { openSheet, closeSheet, esc, icon, toast, num, clamp, hydratePhotos, $ } from './ui.js';
 
@@ -36,7 +36,8 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
         muscles: [],
         sets: [{ reps: 12, kg: 0 }],
         minutes: null,
-        met: kind === 'cardio' ? 3.5 : 5,
+        met: 3.5,
+        movement: '',
         kcal: null,
         cardioType: 'walk',
         howTo: '',
@@ -45,7 +46,8 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     m.kind = preset.kind;
     m.name = preset.name;
     m.muscles = preset.muscles || [];
-    m.met = preset.met || m.met;
+    m.movement = preset.movement || '';
+    m.met = preset.kind === 'strength' ? strengthMet(m.movement) : preset.met || m.met;
     m.cardioType = preset.cardioType || m.cardioType;
     m.howTo = preset.howTo || '';
     if (preset.sets?.length) m.sets = clone(preset.sets);
@@ -56,15 +58,19 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
   let thumb = null; // новое фото (ещё не сохранено)
   let b64 = null; // для запросов к ИИ
   let photoId = m.photoId || null;
-  const ui = { busy: false, status: '', statusKind: '', alts: [], seen: '', conf: '', hint: '', form: null, kcalManual: !!edit && edit.kcal != null, steps: '' };
+  const ui = { busy: false, status: '', statusKind: '', alts: [], seen: '', conf: '', hint: '', form: null, kcalManual: !!edit && edit.kcal != null, steps: '', setsTouched: !!edit, nameFromAI: false };
   if (edit) m.kcal = edit.kcal;
 
   const hasKey = () => !!state.settings.apiKey?.trim();
-  const minutes = () => (m.minutes != null && m.minutes !== '' ? Number(m.minutes) : m.kind === 'cardio' ? 30 : strengthMinutes(m.sets.length));
+  const minutes = () => (m.minutes != null && m.minutes !== '' ? Number(m.minutes) : m.kind === 'cardio' ? 30 : strengthMinutes(m.sets));
   const autoKcal = () => burnKcal(m.met, minutes(), kg);
   const shownKcal = () => (ui.kcalManual && m.kcal != null ? Number(m.kcal) : autoKcal());
   // время, посчитанное автоматически, при правке подходов должно пересчитываться
-  if (edit && edit.kind === 'strength' && edit.minutes === strengthMinutes(edit.sets.length)) m.minutes = null;
+  if (edit && edit.kind === 'strength') {
+    if (!edit.v) m.minutes = null; // запись по старой модели: пересчитаем по новой
+    else if (edit.minutes === strengthMinutes(edit.sets)) m.minutes = null;
+    m.met = strengthMet(m.movement);
+  }
   // при редактировании «своё» значение только если оно реально отличается от оценки
   if (edit) ui.kcalManual = edit.kcal != null && Math.abs(edit.kcal - autoKcal()) > 1;
 
@@ -163,6 +169,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
         <div>${icon('flame')}<b id="w-kcal">${shownKcal()}</b> ккал сожжено <span class="muted">${ui.kcalManual ? '(вручную)' : '(оценка)'}</span></div>
         <input class="input num" inputmode="numeric" data-in="kcal" placeholder="своё" value="${ui.kcalManual ? m.kcal : ''}">
       </div>
+      <p class="hint">Это чистый расход сверх покоя: время упражнения с отдыхом × нагрузка (${m.kind === 'strength' ? (m.movement === 'isolation' ? 'лёгкая, на одну мышцу' : m.movement === 'compound' ? 'средняя, большие мышцы' : 'средняя') : 'по виду кардио'}). Реальный расход может отличаться на ±30%.</p>
       ${formBlock()}
       <div class="sheet-actions">
         ${edit ? `<button class="btn danger" data-s="del">${icon('trash')}</button>` : ''}
@@ -175,6 +182,8 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
   function refreshKcal() {
     const el = $('#w-kcal', ctl.body);
     if (el) el.textContent = shownKcal();
+    const mi = $('[data-in="minutes"]', ctl.body);
+    if (mi) mi.placeholder = minutes();
   }
 
   // ---------- ИИ ----------
@@ -190,12 +199,20 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     draw();
     try {
       const r = await identifyExercise({ b64, hint: ui.hint.trim() || (!b64 ? m.name.trim() : '') });
-      m.name = r.name || m.name;
+      // название, которое человек вписал сам, ИИ не затирает: его вариант уходит в подсказки
+      const typed = m.name.trim();
+      const keepTyped = typed && !ui.hint.trim() && !ui.nameFromAI;
+      const aiName = r.name || '';
+      if (!keepTyped && aiName) {
+        m.name = aiName;
+        ui.nameFromAI = true;
+      }
       m.kind = r.kind === 'cardio' ? 'cardio' : 'strength';
       m.muscles = r.muscles || [];
-      m.met = clamp(Number(r.met) || m.met, 2, 9);
+      m.movement = r.movement === 'isolation' ? 'isolation' : r.movement === 'compound' ? 'compound' : '';
+      m.met = m.kind === 'strength' ? strengthMet(m.movement) : clamp(Number(r.met) || m.met, 2, 9);
       m.howTo = r.how_to || '';
-      ui.alts = (r.alternatives || []).filter((a) => a && a.toLowerCase() !== m.name.toLowerCase());
+      ui.alts = [aiName, ...(r.alternatives || [])].filter((a, i, arr) => a && a.toLowerCase() !== m.name.toLowerCase() && arr.indexOf(a) === i);
       ui.seen = r.seen_text || '';
       ui.conf = r.confidence;
       if (m.kind === 'cardio') {
@@ -203,7 +220,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
         m.cardioType = guess;
       }
       const prev = lastSame(m.name);
-      if (prev && prev.kind === 'strength' && prev.sets?.length) m.sets = clone(prev.sets);
+      if (prev && prev.kind === 'strength' && prev.sets?.length && !ui.setsTouched) m.sets = clone(prev.sets);
       ui.status = r.confidence === 'low' ? 'Не уверен — проверь название ниже' : 'Готово. Проверь название и заполни подходы';
       ui.statusKind = r.confidence === 'low' ? 'warn' : 'ok';
     } catch (e) {
@@ -238,7 +255,7 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     const a = b.dataset.s;
     if (a === 'kind') {
       m.kind = b.dataset.v;
-      m.met = m.kind === 'cardio' ? CARDIO[m.cardioType || 'walk']?.met || 5 : 5;
+      m.met = m.kind === 'cardio' ? CARDIO[m.cardioType || 'walk']?.met || 5 : strengthMet(m.movement);
       if (m.kind === 'cardio' && !m.cardioType) m.cardioType = 'walk';
       draw();
     } else if (a === 'ctype') {
@@ -280,13 +297,16 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     if (t.dataset.set) {
       const s = m.sets[Number(t.dataset.i)];
       s[t.dataset.set] = num(t.value);
+      ui.setsTouched = true;
       if (m.minutes == null || m.minutes === '') refreshKcal();
       return;
     }
     const k = t.dataset.in;
     if (!k) return;
-    if (k === 'name') m.name = t.value;
-    else if (k === 'hint') ui.hint = t.value;
+    if (k === 'name') {
+      m.name = t.value;
+      ui.nameFromAI = false;
+    } else if (k === 'hint') ui.hint = t.value;
     else if (k === 'minutes') {
       m.minutes = t.value === '' ? null : num(t.value);
       refreshKcal();
@@ -316,7 +336,8 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
     if (!prev || edit) return;
     m.kind = prev.kind;
     m.muscles = prev.muscles || [];
-    m.met = prev.met || m.met;
+    m.movement = prev.movement || '';
+    m.met = prev.kind === 'strength' ? strengthMet(m.movement) : prev.met || m.met;
     m.howTo = prev.howTo || '';
     m.cardioType = prev.cardioType || m.cardioType;
     if (prev.sets?.length) m.sets = clone(prev.sets);
@@ -347,6 +368,8 @@ export async function openWorkout({ file = null, preset = null, edit = null, kin
       sets,
       minutes: minutes(),
       met: m.met,
+      movement: m.movement || '',
+      v: 2,
       kcal: Math.round(shownKcal()),
       photoId,
       howTo: m.howTo || '',

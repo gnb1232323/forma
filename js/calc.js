@@ -46,7 +46,33 @@ export function goals(profile, kg) {
 export const burnPerMin = (met, kg) => (Math.max(0, met - 1) * 3.5 * kg) / 200;
 export const burnKcal = (met, minutes, kg) => Math.round(burnPerMin(met, kg) * minutes);
 
-export const strengthMinutes = (sets) => Math.max(5, Math.round(sets * 2.5));
+// Силовое: средняя нагрузка за всё время упражнения (с отдыхом), MET по справочнику Compendium.
+// Многосуставные (жим, тяга, присед) тяжелее, изолирующие (махи, сведения, сгибания) легче.
+export const STRENGTH_MET = { compound: 3.8, isolation: 3.0, default: 3.5 };
+export const strengthMet = (movement) => STRENGTH_MET[movement] || STRENGTH_MET.default;
+
+// Время упражнения: работа (~3,5 с на повтор) + отдых между подходами (~75 с).
+export function strengthMinutes(sets) {
+  const list = Array.isArray(sets) ? sets : Array.from({ length: Number(sets) || 1 }, () => ({ reps: 10 }));
+  const min = list.reduce((a, s) => a + ((Number(s.reps) || 0) * 3.5) / 60 + 1.25, 0);
+  return Math.max(3, Math.round(min));
+}
+
+// Старые записи (до версии расчёта 2) пересчитываем по новой модели
+export function migrateWorkouts(state) {
+  const kg = currentWeight(state);
+  let changed = false;
+  for (const w of state.workouts) {
+    if (w.kind !== 'strength' || w.v >= 2) continue;
+    const oldAuto = Math.max(5, Math.round((w.sets?.length || 1) * 2.5));
+    if (w.minutes === oldAuto || !w.minutes) w.minutes = strengthMinutes(w.sets || []);
+    w.met = strengthMet(w.movement);
+    w.kcal = burnKcal(w.met, w.minutes, kg);
+    w.v = 2;
+    changed = true;
+  }
+  return changed;
+}
 
 export function equivalents(kcal, kg) {
   return [

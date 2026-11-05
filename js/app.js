@@ -1,5 +1,5 @@
-import { state, view, load, subscribe, today, iso } from './store.js';
-import { goals, dayStats, currentWeight, equivalents, setsSummary, MODES } from './calc.js';
+import { state, view, load, subscribe, today, iso, commit } from './store.js';
+import { goals, dayStats, currentWeight, equivalents, setsSummary, migrateWorkouts, MODES } from './calc.js';
 import { openWorkout, recentExercises } from './workout.js';
 import { openFood, openBarcode, SLOTS } from './food.js';
 import { openWelcome, openSettings, openWeight, openModePicker } from './settings.js';
@@ -243,6 +243,7 @@ document.addEventListener('visibilitychange', () => {
 // ---------- Старт ----------
 (async function init() {
   await load();
+  if (state.profile && migrateWorkouts(state)) commit(); // старые силовые пересчитаны по новой модели
   subscribe(render);
   if (!state.profile) openWelcome();
   else render();
